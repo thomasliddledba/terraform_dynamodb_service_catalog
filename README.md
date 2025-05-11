@@ -92,7 +92,7 @@ module "global_dynamodb" {
 ## Outputs
 | File            | Purpose                                                                 |
 |-----------------|-------------------------------------------------------------------------|
-| `dynamodb_table_arn`  The ARN of the created DynamoDB table                               |
+| `dynamodb_table_arn` |  The ARN of the created DynamoDB table                             |
 
 
 ## Notes
