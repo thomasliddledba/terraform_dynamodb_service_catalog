@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DynamoDB Global Table with autoscaling, TTL, GSI, and IAM role for autoscaling
+
+Parameters:
+  TableName:
+    Type: String
+    Description: Name of the DynamoDB table
+
+  PrimaryKey:
+    Type: String
+    Description: Primary key attribute name
+
+  SortKey:
+    Type: String
+    Description: Sort key attribute name
+
+  BillingMode:
+    Type: String
+    Default: PAY_PER_REQUEST
+    AllowedValues: [PAY_PER_REQUEST, PROVISIONED]
+    Description: Billing mode
+
+  ReadCapacityUnits:
+    Type: Number
+    Default: 5
+    Description: Read capacity units (used if PROVISIONED)
+
+  WriteCapacityUnits:
+    Type: Number
+    Default: 5
+    Description: Write capacity units (used if PROVISIONED)
+
+  TTLAttribute:
+    Type: String
+    Default: ""
+    Description: TTL attribute name (optional)
+
+  ReplicaRegions:
+    Type: CommaDelimitedList
+    Description: Comma-separated AWS regions for global replication
+
+Resources:
+  AutoscaleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DynamoDBAutoscaleRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAutoScalingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:SetAlarmState
+                  - cloudwatch:DeleteAlarms
+                Resource: "*"
+
+  DynamoGlobalTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: !Ref BillingMode
+      AttributeDefinitions:
+        - AttributeName: !Ref PrimaryKey
+          AttributeType: S
+        - AttributeName: !Ref SortKey
+          AttributeType: S
+        - AttributeName: customer_name
+          AttributeType: S
+        - AttributeName: order_date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: !Ref PrimaryKey
+          KeyType: HASH
+        - AttributeName: !Ref SortKey
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: CustomerNameIndex
+          KeySchema:
+            - AttributeName: customer_name
+              KeyType: HASH
+            - AttributeName: order_date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - email
+              - address
+          ProvisionedThroughput:
+            Fn::If:
+              - IsProvisioned
+              - ReadCapacityUnits: !Ref ReadCapacityUnits
+                WriteCapacityUnits: !Ref WriteCapacityUnits
+              - !Ref AWS::NoValue
+      Replicas:
+        Fn::Split:
+          - ","
+          - !Join [",", !Ref ReplicaRegions]
+      TimeToLiveSpecification:
+        Fn::If:
+          - EnableTTL
+          - Enabled: true
+            AttributeName: !Ref TTLAttribute
+          - !Ref AWS::NoValue
+      ProvisionedThroughput:
+        Fn::If:
+          - IsProvisioned
+          - ReadCapacityUnits: !Ref ReadCapacityUnits
+            WriteCapacityUnits: !Ref WriteCapacityUnits
+          - !Ref AWS::NoValue
+
+  ReadAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: IsProvisioned
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub table/${TableName}
+      RoleARN: !GetAtt AutoscaleRole.Arn
+      ScalableDimension: dynamodb:table:ReadCapacityUnits
+      ServiceNamespace: dynamodb
+
+  WriteAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: IsProvisioned
+    Properties:
+      MaxCapacity: 50
+      MinCapacity: 5
+      ResourceId: !Sub table/${TableName}
+      RoleARN: !GetAtt AutoscaleRole.Arn
+      ScalableDimension: dynamodb:table:WriteCapacityUnits
+      ServiceNamespace: dynamodb
+
+  ReadAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: IsProvisioned
+    Properties:
+      PolicyName: !Sub ${TableName}-ReadAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ReadAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: DynamoDBReadCapacityUtilization
+
+  WriteAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: IsProvisioned
+    Properties:
+      PolicyName: !Sub ${TableName}-WriteAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WriteAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: DynamoDBWriteCapacityUtilization
+
+Conditions:
+  EnableTTL: !Not [!Equals [!Ref TTLAttribute, ""]]
+  IsProvisioned: !Equals [!Ref BillingMode, PROVISIONED]
+
+Outputs:
+  TableArn:
+    Description: ARN of the global DynamoDB table
+    Value: !GetAtt DynamoGlobalTable.Arn
+
+  AutoScalingRoleArn:
+    Description: ARN of the IAM role used by Auto Scaling
+    Value: !GetAtt AutoscaleRole.Arn
